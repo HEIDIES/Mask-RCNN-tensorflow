@@ -407,5 +407,64 @@ def rpn_bbox_loss(target_bbox, rpn_match, rpn_bbox):
 
 
 def mrcnn_class_loss(target_class_ids, pred_class_logits,
-                           active_class_ids):
+                     active_class_ids):
+    target_class_ids = tf.cast(target_class_ids, tf.int64)
 
+    pred_class_ids = tf.argmax(pred_class_logits, axis=2)
+
+    # pred_active = utils.batch_slice([active_class_ids, pred_class_ids], lambda x, y: tf.gather(x, y),
+    #                                 hyper_parameters.FLAGS.IMAGE_PER_GPU)
+    pred_active = tf.gather(active_class_ids[0], pred_class_ids)
+
+    loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+        labels=target_class_ids, logits=pred_class_logits)
+
+    loss = loss * pred_active
+    loss = tf.reduce_sum(loss) / tf.reduce_sum(pred_active)
+    return loss
+
+
+def mrcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
+    target_class_ids = tf.reshape(target_class_ids, (-1,))
+    target_bbox = tf.reshape(target_bbox, (-1, 4))
+    pred_bbox = tf.reshape(pred_bbox, (-1, tf.shape(pred_bbox)[2], 4))
+
+    positive_roi_ix = tf.where(target_class_ids > 0)[:, 0]
+    positive_roi_class_ids = tf.cast(
+        tf.gather(target_class_ids, positive_roi_ix), tf.int64)
+    indices = tf.stack([positive_roi_ix, positive_roi_class_ids], axis=1)
+
+    target_bbox = tf.gather(target_bbox, positive_roi_ix)
+    pred_bbox = tf.gather_nd(pred_bbox, indices)
+
+    loss = tf.cond(tf.size(target_bbox) > 0,
+                   ops.smooth_l1_loss(y_true=target_bbox, y_pred=pred_bbox),
+                   tf.constant(0.0))
+
+    loss = tf.reduce_mean(loss)
+    return loss
+
+
+def mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
+    target_class_ids = tf.reshape(target_class_ids, (-1,))
+    mask_shape = tf.shape(target_masks)
+    target_masks = tf.reshape(target_masks, (-1, mask_shape[2], mask_shape[3]))
+    pred_shape = tf.shape(pred_masks)
+    pred_masks = tf.reshape(pred_masks,
+                            (-1, pred_shape[2], pred_shape[3], pred_shape[4]))
+
+    pred_masks = tf.transpose(pred_masks, [0, 3, 1, 2])
+
+    positive_ix = tf.where(target_class_ids > 0)[:, 0]
+    positive_class_ids = tf.cast(
+        tf.gather(target_class_ids, positive_ix), tf.int64)
+    indices = tf.stack([positive_ix, positive_class_ids], axis=1)
+
+    target_masks = tf.gather(target_masks, positive_ix)
+    pred_masks = tf.gather_nd(pred_masks, indices)
+
+    loss = tf.keras.backend.switch(tf.size(target_masks) > 0,
+                                   tf.keras.backend.binary_crossentropy(target=target_masks, output=pred_masks),
+                                   tf.constant(0.0))
+    loss = tf.reduce_mean(loss)
+    return loss
