@@ -8,7 +8,7 @@ import numpy as np
 def identity_block(ipt, filters, stage, block, use_bias=True, norm='batch', reuse=False, is_training=True):
 
     nb_filter1, nb_filter2, nb_filter3 = filters
-    conv_name_base = str(stage) + block + '_branch'
+    conv_name_base = 'res' + str(stage) + block + '_branch'
 
     c1s1kx = ops.conv2d(ipt, nb_filter1, 1, 0, 1, norm=norm, activation=tf.nn.relu,
                         name=conv_name_base + '2a', reuse=reuse, is_training=is_training,
@@ -31,7 +31,7 @@ def identity_block(ipt, filters, stage, block, use_bias=True, norm='batch', reus
 def conv_block(ipt, filters, stage, block, norm='batch', reuse=False, is_training=True, use_bias=True):
 
     nb_filter1, nb_filter2, nb_filter3 = filters
-    conv_name_base = str(stage) + block + '_branch'
+    conv_name_base = 'res' + str(stage) + block + '_branch'
 
     c1s2kx = ops.conv2d(ipt, nb_filter1, 1, 0, 2, norm=norm, activation=tf.nn.relu,
                         name=conv_name_base + '2a', reuse=reuse,
@@ -45,7 +45,7 @@ def conv_block(ipt, filters, stage, block, norm='batch', reuse=False, is_trainin
                         name=conv_name_base + '2c', reuse=reuse, is_training=is_training,
                         use_bias=use_bias, kernel_initializer='glorot_uniform_tanh')
 
-    shortcut = ops.conv2d(ipt, nb_filter3, 1, 0, 1, norm=norm, activation=None,
+    shortcut = ops.conv2d(ipt, nb_filter3, 1, 0, 2, norm=norm, activation=None,
                           name=conv_name_base + '1', reuse=reuse, is_training=is_training,
                           use_bias=use_bias, kernel_initializer='glorot_uniform_tanh')
 
@@ -100,10 +100,10 @@ def clip_boxes_graph(boxes, window):
 
 def target_detection(proposals, gt_class_ids, gt_boxes, gt_masks):
 
-    assert_ = tf.Assert(tf.greater(tf.shape(proposals)[0], 0), [proposals], name='roi_assert')
+    # assert_ = tf.Assert(tf.greater(tf.shape(proposals)[0], 0), [proposals], name='roi_assert')
 
-    with tf.control_dependencies(assert_):
-        proposals = tf.identity(proposals)
+    # with tf.control_dependencies(assert_):
+    #     proposals = tf.identity(proposals)
 
     proposals, _ = utils.trim_zeros_graph(proposals, name="trim_proposals")
     gt_boxes, non_zeros = utils.trim_zeros_graph(gt_boxes, name="trim_gt_boxes")
@@ -155,7 +155,7 @@ def target_detection(proposals, gt_class_ids, gt_boxes, gt_masks):
     roi_gt_boxes = tf.gather(gt_boxes, roi_gt_box_assignment)
     roi_gt_class_ids = tf.gather(gt_class_ids, roi_gt_box_assignment)
 
-    deltas = utils.boxes_to_delta(positive_rois, roi_gt_boxes)
+    deltas = utils.box_refinement_graph(positive_rois, roi_gt_boxes)
     deltas /= np.array(hyper_parameters.FLAGS.BBOX_STD_DEV)
 
     transposed_masks = tf.expand_dims(tf.transpose(gt_masks, [2, 0, 1]), -1)
@@ -287,36 +287,28 @@ def rpn(ipt, anchors_per_location, anchor_stride, reuse=False, is_training=True,
 
 def fpn_classifier(ipt, pool_size, num_classes, is_training=True,
                    fc_layers_size=1024):
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(fc_layers_size,
-                                                                 (pool_size, pool_size),
-                                                                 padding='valid'),
-                                          name="mrcnn_class_conv1")(ipt)
 
-    ipt = tf.keras.layers.TimeDistributed(ops.BatchNorm(),
-                                          name='mrcnn_class_bn1')(ipt, training=is_training)
+    ipt = tf.map_fn(lambda x: ops.conv2d(x, fc_layers_size, pool_size, 0, 1, norm='batch', activation=tf.nn.relu,
+                                         is_training=is_training, name='mrcnn_class_conv1',
+                                         use_bias=True, kernel_initializer='glorot_uniform_tanh'),
+                    elems=ipt, dtype=tf.float32)
 
-    ipt = tf.nn.relu(ipt)
-
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(fc_layers_size,
-                                                                 (1, 1),
-                                                                 padding='valid'),
-                                          name='mrcnn_class_conv2')(ipt)
-
-    ipt = tf.keras.layers.TimeDistributed(ops.BatchNorm(),
-                                          name='mrcnn_class_bn2')(ipt, training=is_training)
-
-    ipt = tf.nn.relu(ipt)
+    ipt = tf.map_fn(lambda x: ops.conv2d(x, fc_layers_size, 1, 0, 1, norm='batch', activation=tf.nn.relu,
+                                         is_training=is_training, name='mrcnn_class_conv2',
+                                         use_bias=True, kernel_initializer='glorot_uniform_tanh'),
+                    elems=ipt, dtype=tf.float32)
 
     shared = tf.squeeze(tf.squeeze(ipt, 3), 2)
 
-    mrcnn_class_logits = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(num_classes),
-                                                         name='mrcnn_class_logits')(shared)
+    mrcnn_class_logits = tf.map_fn(lambda x: ops.fully_connected(x, num_classes, name='mrcnn_class_logits',
+                                                                 weights_initializer='glorot_uniform_tanh'),
+                                   elems=shared, dtype=tf.float32)
 
-    mrcnn_probs = tf.keras.layers.TimeDistributed(tf.keras.layers.Activation('softmax'),
-                                                  name='mrcnn_class')(mrcnn_class_logits)
+    mrcnn_probs = tf.map_fn(lambda x: tf.nn.softmax(x, name='mrcnn_class'), elems=mrcnn_class_logits, dtype=tf.float32)
 
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Dense(4 * num_classes, activation='linear'),
-                                          name='mrcnn_bbox_fc')(shared)
+    ipt = tf.map_fn(lambda x: ops.fully_connected(x, 4 * num_classes, name='mrcnn_bbox_fc',
+                                                  weights_initializer='glorot_uniform_tanh'),
+                    elems=shared, dtype=tf.float32)
 
     ipt_shape = tf.shape(ipt)
 
@@ -326,59 +318,59 @@ def fpn_classifier(ipt, pool_size, num_classes, is_training=True,
 
 
 def build_fpn_mask(ipt, num_classes, is_training=True):
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(256, (3, 3),
-                                                                 padding='same'),
-                                          name='mrcnn_mask_conv1')(ipt)
 
-    ipt = tf.keras.layers.TimeDistributed(ops.BatchNorm(), name='mrcnn_mask_bn1')(ipt, training=is_training)
+    ipt = tf.map_fn(lambda x: ops.conv2d(x, 256, 3, 1, 1, norm='batch', activation=tf.nn.relu,
+                                         is_training=is_training, name='mrcnn_mask_conv1',
+                                         use_bias=True, kernel_initializer='glorot_uniform_tanh'),
+                    elems=ipt, dtype=tf.float32)
 
-    ipt = tf.nn.relu(ipt)
+    ipt = tf.map_fn(lambda x: ops.conv2d(x, 256, 3, 1, 1, norm='batch', activation=tf.nn.relu,
+                                         is_training=is_training, name='mrcnn_mask_conv2',
+                                         use_bias=True, kernel_initializer='glorot_uniform_tanh'),
+                    elems=ipt, dtype=tf.float32)
 
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(256, (3, 3),
-                                                                 padding='same'),
-                                          name='mrcnn_mask_conv2')(ipt)
+    ipt = tf.map_fn(lambda x: ops.conv2d(x, 256, 3, 1, 1, norm='batch', activation=tf.nn.relu,
+                                         is_training=is_training, name='mrcnn_mask_conv3',
+                                         use_bias=True, kernel_initializer='glorot_uniform_tanh'),
+                    elems=ipt, dtype=tf.float32)
 
-    ipt = tf.keras.layers.TimeDistributed(ops.BatchNorm(), name='mrcnn_mask_bn2')(ipt, training=is_training)
+    ipt = tf.map_fn(lambda x: ops.conv2d(x, 256, 3, 1, 1, norm='batch', activation=tf.nn.relu,
+                                         is_training=is_training, name='mrcnn_mask_conv4',
+                                         use_bias=True, kernel_initializer='glorot_uniform_tanh'),
+                    elems=ipt, dtype=tf.float32)
 
-    ipt = tf.nn.relu(ipt)
+    ipt = tf.map_fn(lambda x: ops.unconv2d(x, 256, 2, 2, norm=None, activation=tf.nn.relu,
+                                           use_bias=True, name='mrcnn_mask_unconv', is_training=is_training,
+                                           kernel_initializer='glorot_uniform_tanh'),
+                    elems=ipt, dtype=tf.float32)
 
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(256, (3, 3),
-                                                                 padding='same'),
-                                          name='mrcnn_mask_conv3')(ipt)
-
-    ipt = tf.keras.layers.TimeDistributed(ops.BatchNorm(), name='mrcnn_mask_bn3')(ipt, training=is_training)
-
-    ipt = tf.nn.relu(ipt)
-
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(256, (3, 3),
-                                                                 padding='same'),
-                                          name='mrcnn_mask_conv4')(ipt)
-
-    ipt = tf.keras.layers.TimeDistributed(ops.BatchNorm(), name='mrcnn_mask_bn4')(ipt, training=is_training)
-
-    ipt = tf.nn.relu(ipt)
-
-    ipt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2DTranspose(256, (2, 2),
-                                                                          strides=2,
-                                                                          activation='relu'),
-                                          name='mrcnn_mask_unconv')(ipt)
-
-    opt = tf.keras.layers.TimeDistributed(tf.keras.layers.Conv2D(num_classes, (1, 1),
-                                                                 activation='sigmoid'),
-                                          name='mrcnn_mask')(ipt)
+    opt = tf.map_fn(lambda x: ops.conv2d(x, num_classes, 1, 0, 1, activation=tf.nn.sigmoid,
+                                         is_training=is_training, use_bias=True,
+                                         kernel_initializer='glorot_uniform_tanh',
+                                         name='mrcnn_mask'),
+                    elems=ipt, dtype=tf.float32)
 
     return opt
 
 
 def rpn_loss(rpn_match, rpn_class_logits):
+    """RPN anchor classifier loss.
+
+    rpn_match: [batch, anchors, 1]. Anchor match type. 1=positive,
+                   -1=negative, 0=neutral anchor.
+    rpn_class_logits: [batch, anchors, 2]. RPN classifier logits for FG/BG.
+    """
     rpn_match = tf.squeeze(rpn_match, -1)
 
-    anchor_class = tf.cast(tf.equal(rpn_match, 1), tf.float32)
+    anchor_class = tf.cast(tf.equal(rpn_match, 1), tf.int32)
 
     indices = tf.where(tf.not_equal(rpn_match, 0))
 
     rpn_class_logits = tf.gather_nd(rpn_class_logits, indices)
     anchor_class = tf.gather_nd(anchor_class, indices)
+
+    anchor_class = tf.expand_dims(anchor_class, -1)
+    anchor_class = tf.one_hot(anchor_class, 2, dtype=tf.float32, axis=-1)
 
     loss = tf.nn.softmax_cross_entropy_with_logits(labels=anchor_class, logits=rpn_class_logits)
 
@@ -396,7 +388,7 @@ def rpn_bbox_loss(target_bbox, rpn_match, rpn_bbox):
     batch_counts = tf.reduce_sum(tf.cast(tf.equal(rpn_match, 1), tf.int32), axis=1)
 
     target_bbox = ops.batch_pack_graph(target_bbox, batch_counts,
-                                       hyper_parameters.FLAGS.IMAGE_PER_GPU)
+                                       hyper_parameters.FLAGS.IMAGES_PER_GPU)
 
     loss = ops.smooth_l1_loss(target_bbox, rpn_bbox)
 
@@ -408,13 +400,13 @@ def rpn_bbox_loss(target_bbox, rpn_match, rpn_bbox):
 
 def mrcnn_class_loss(target_class_ids, pred_class_logits,
                      active_class_ids):
-    target_class_ids = tf.cast(target_class_ids, tf.int64)
+    target_class_ids = tf.cast(target_class_ids, 'int64')
 
     pred_class_ids = tf.argmax(pred_class_logits, axis=2)
 
     # pred_active = utils.batch_slice([active_class_ids, pred_class_ids], lambda x, y: tf.gather(x, y),
     #                                 hyper_parameters.FLAGS.IMAGE_PER_GPU)
-    pred_active = tf.gather(active_class_ids[0], pred_class_ids)
+    pred_active = tf.cast(tf.gather(active_class_ids[0], pred_class_ids), tf.float32)
 
     loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
         labels=target_class_ids, logits=pred_class_logits)
@@ -436,10 +428,11 @@ def mrcnn_bbox_loss(target_bbox, target_class_ids, pred_bbox):
 
     target_bbox = tf.gather(target_bbox, positive_roi_ix)
     pred_bbox = tf.gather_nd(pred_bbox, indices)
+    # loss = tf.keras.backend.switch(tf.size(target_bbox) > 0,
+    #                                ops.smooth_l1_loss(y_true=target_bbox, y_pred=pred_bbox),
+    #                                tf.constant(0.0))
 
-    loss = tf.cond(tf.size(target_bbox) > 0,
-                   ops.smooth_l1_loss(y_true=target_bbox, y_pred=pred_bbox),
-                   tf.constant(0.0))
+    loss = ops.smooth_l1_loss(y_true=target_bbox, y_pred=pred_bbox)
 
     loss = tf.reduce_mean(loss)
     return loss
@@ -463,8 +456,11 @@ def mrcnn_mask_loss(target_masks, target_class_ids, pred_masks):
     target_masks = tf.gather(target_masks, positive_ix)
     pred_masks = tf.gather_nd(pred_masks, indices)
 
-    loss = tf.keras.backend.switch(tf.size(target_masks) > 0,
-                                   tf.keras.backend.binary_crossentropy(target=target_masks, output=pred_masks),
-                                   tf.constant(0.0))
+    # loss = tf.keras.backend.switch(tf.size(target_masks) > 0,
+    #                                tf.keras.backend.binary_crossentropy(target=target_masks, output=pred_masks),
+    #                                tf.constant(0.0))
+
+    loss = target_masks * tf.log(pred_masks) + (1 - target_masks) * tf.log(pred_masks)
+
     loss = tf.reduce_mean(loss)
     return loss

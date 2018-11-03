@@ -8,10 +8,14 @@ class PyramidRoiPooling:
         self.name = name
         self.roi_size = roi_size
 
-    def __call__(self, ipt):
+    def __call__(self, ipt, pool_size=None):
+
+        if pool_size is not None:
+            self.roi_size = pool_size
+
         boxes = ipt[0]
         image_meta = ipt[1]
-        feature_maps = ipt[2]
+        feature_maps = ipt[2:]
 
         y1, x1, y2, x2 = tf.split(boxes, [1, 1, 1, 1], axis=2)
 

@@ -15,7 +15,7 @@ class Resnet:
 
     def __call__(self, ipt):
 
-        assert self.architecture in ['resnet51', 'resnet101']
+        assert self.architecture in ['resnet50', 'resnet101']
 
         with tf.variable_scope(self.name):
 
@@ -24,7 +24,7 @@ class Resnet:
             c7s2k64 = ops.conv2d(ipt, 64, 7, 3, 2, name='conv1', reuse=self.reuse, is_training=self.is_training,
                                  norm=self.norm, use_bias=self.use_bias, activation=tf.nn.relu)
 
-            c1 = c7s2k64 = tf.nn.max_pool(c7s2k64, [1, 3, 3, 1], [1, 2, 2, 1], padding='same')
+            c1 = c7s2k64 = tf.nn.max_pool(c7s2k64, [1, 3, 3, 1], [1, 2, 2, 1], padding='SAME')
 
             # stage2
 
@@ -87,4 +87,7 @@ class Resnet:
                                           is_training=self.is_training, use_bias=self.use_bias)
             else:
                 c5 = None
-            return [c1, c2, c3, c4, c5]
+
+        self.var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
+        self.reuse = True
+        return [c1, c2, c3, c4, c5]

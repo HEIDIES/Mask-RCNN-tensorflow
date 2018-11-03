@@ -36,17 +36,8 @@ def _weights(name, shape, mean=0.0, stddev=0.01, initializer=None):
             )
         )
     elif initializer == 'glorot_uniform_tanh':
-        fin = shape[2]
-        fout = shape[3]
-        if len(shape) == 2:
-            fin = shape[0]
-            fout = shape[1]
-        fin = tf.cast(fin, tf.float32)
-        fout = tf.cast(fout, tf.float32)
         var = tf.get_variable(
-            name, shape, initializer=tf.random_uniform_initializer(
-                minval=-tf.sqrt(6. / (fin + fout)), dtype=tf.float32
-            )
+            name, shape, initializer=tf.contrib.layers.xavier_initializer()
         )
     elif initializer == 'glorot_normal_sigmoid':
         fin = shape[2]
@@ -217,7 +208,7 @@ def unconv2d(x, output_dims, ksize, stride=1, norm=None, activation=None,
         weights = _weights(name='weights', shape=[ksize, ksize, output_dims, input_shape[3]],
                            initializer=kernel_initializer)
         x = tf.nn.conv2d_transpose(
-            x, weights, [input_shape[0], input_shape[1] * stride,
+            x, weights, [tf.shape(x)[0], input_shape[1] * stride,
                          input_shape[2] * stride, output_dims],
             strides=[1, stride, stride, 1], padding='SAME'
         )
@@ -344,7 +335,7 @@ def log2_graph(x):
     :param x: 4D tensor
     :return: float, log2 of input
     """
-    return tf.log(x) / tf.log(2)
+    return tf.log(x) / tf.log(2.0)
 
 
 def iou(boxes1, boxes2):
@@ -402,8 +393,7 @@ def smooth_l1_loss(y_true, y_pred):
     """
     diff = tf.abs(y_true - y_pred)
     less_than_one = tf.cast(tf.less(diff, 1.0), tf.float32)
-    loss = (less_than_one * 0.5 * tf.square(diff, 2)) + (tf.constant(1.0)
-                                                         - less_than_one) * (diff - tf.constant(0.5))
+    loss = (less_than_one * 0.5 * tf.square(diff)) + (1 - less_than_one) * (diff - tf.constant(0.5))
     return loss
 
 
@@ -415,3 +405,18 @@ def batch_pack_graph(x, counts, num_rows):
     for i in range(num_rows):
         outputs.append(x[i, :counts[i]])
     return tf.concat(outputs, axis=0)
+
+
+def norm_boxes(boxes, shape):
+    """
+    Args:
+        boxes: [..., (y1, x1, y2, x2)] in pixel coordinates
+        shape: [..., (height, width)] in pixels
+
+    Returns:
+        [..., (y1, x1, y2, x2)] in normalized coordinates
+    """
+    h, w = tf.split(tf.cast(shape, tf.float32), 2, axis=-1)
+    scale = tf.concat([h, w, h, w], axis=-1) - tf.constant(1.0)
+    shift = tf.constant([0., 0., 1., 1.])
+    return tf.divide(boxes - shift, scale)
